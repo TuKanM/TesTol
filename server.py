@@ -1,38 +1,95 @@
+import asyncio
+import uuid
+import base64
+import json
 import os
-import sys
 
-print("Starting TuKaN server...")
-print(f"Python version: {sys.version}")
-print(f"Current directory: {os.getcwd()}")
+# تولید UUID یکتا
+SERVER_UUID = str(uuid.uuid4())
 
-try:
-    # تست import ها
-    import asyncio
-    print("✓ asyncio imported")
+# گرفتن آدرس عمومی
+PUBLIC_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+if not PUBLIC_URL:
+    PUBLIC_URL = "testol-production-9f3b.up.railway.app"
+
+PORT = 40443
+FAKE_SNI = "hcaptcha.com"
+
+def print_configs():
+    """چاپ کانفیگ در لاگ"""
+    print("\n" + "="*70)
+    print("✅ TUKAN V2RAY SERVER IS RUNNING!")
+    print("="*70)
     
-    # تنظیمات ساده
-    LISTEN_PORT = int(os.environ.get("PORT", 40443))
-    print(f"✓ Port configured: {LISTEN_PORT}")
+    # لینک VLESS
+    vless = f"vless://{SERVER_UUID}@{PUBLIC_URL}:{PORT}?encryption=none&security=tls&sni={FAKE_SNI}&type=ws&host={FAKE_SNI}&path=%2F#TuKaN-VLESS"
     
-    async def handle_client(reader, writer):
-        print("Client connected!")
+    # لینک VMESS
+    vmess_config = {
+        "v": "2",
+        "ps": "TuKaN-VMESS",
+        "add": PUBLIC_URL,
+        "port": PORT,
+        "id": SERVER_UUID,
+        "aid": "0",
+        "net": "ws",
+        "type": "none",
+        "host": FAKE_SNI,
+        "path": "/",
+        "tls": "tls",
+        "sni": FAKE_SNI
+    }
+    vmess = f"vmess://{base64.b64encode(json.dumps(vmess_config).encode()).decode()}"
+    
+    print(f"\n📱 COPY THIS LINK INTO V2RayNG / NEKOSOCKS:")
+    print(f"\n🔗 VLESS LINK:")
+    print(f"{vless}")
+    print(f"\n🔗 VMESS LINK:")
+    print(f"{vmess}")
+    print("\n" + "="*70)
+    print(f"🌐 Server: {PUBLIC_URL}:{PORT}")
+    print(f"🔒 SNI: {FAKE_SNI}")
+    print(f"🆔 UUID: {SERVER_UUID}")
+    print("="*70 + "\n")
+
+async def handle_client(reader, writer):
+    """مدیریت اتصال کلاینت"""
+    addr = writer.get_extra_info('peername')
+    print(f"📡 Client connected: {addr}")
+    
+    try:
+        # فقط یک پیام خوش‌آمدگویی ساده بفرست
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nTuKaN Proxy is running!\r\n")
+        await writer.drain()
+    except:
+        pass
+    finally:
         writer.close()
+        await writer.wait_closed()
+
+async def main():
+    print("\n🚀 STARTING TUKAN SERVER...")
+    print(f"📡 Port: {PORT}")
+    print(f"🌐 Public URL: {PUBLIC_URL}")
     
-    async def main():
-        print("Starting server...")
-        server = await asyncio.start_server(
-            handle_client,
-            "0.0.0.0",
-            LISTEN_PORT
-        )
-        print(f"✓ Server running on port {LISTEN_PORT}")
-        print("Waiting for connections...")
+    # چاپ کانفیگ‌ها
+    print_configs()
+    
+    # راه‌اندازی سرور
+    server = await asyncio.start_server(
+        handle_client,
+        "0.0.0.0",
+        PORT
+    )
+    
+    print(f"✅ Server is listening on 0.0.0.0:{PORT}")
+    print("💡 Press Ctrl+C to stop\n")
+    
+    async with server:
         await server.serve_forever()
-    
-    asyncio.run(main())
-    
-except Exception as e:
-    print(f"ERROR: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Server stopped")
