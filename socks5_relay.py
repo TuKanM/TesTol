@@ -19,7 +19,6 @@ print(f"""
 """)
 
 def create_fake_client_hello(sni: bytes) -> bytes:
-    import os
     tls_version = b"\x03\x03"
     random_bytes = os.urandom(32)
     session_id = os.urandom(32)
@@ -50,7 +49,7 @@ def create_fake_client_hello(sni: bytes) -> bytes:
 
 async def socks5_handshake(reader, writer):
     data = await reader.read(2)
-    if data[0] != 0x05:
+    if len(data) < 2 or data[0] != 0x05:
         return False
     nmethods = data[1]
     await reader.read(nmethods)
@@ -68,7 +67,7 @@ async def handle_client(client_reader, client_writer):
             return
         
         data = await client_reader.read(4)
-        if data[0] != 0x05:
+        if len(data) < 4 or data[0] != 0x05:
             return
         
         addr_type = data[3]
@@ -77,8 +76,9 @@ async def handle_client(client_reader, client_writer):
             await client_reader.read(2)
         elif addr_type == 0x03:
             domain_len = await client_reader.read(1)
-            await client_reader.read(domain_len[0])
-            await client_reader.read(2)
+            if domain_len:
+                await client_reader.read(domain_len[0])
+                await client_reader.read(2)
         
         target_reader, target_writer = await asyncio.open_connection(CONNECT_IP, CONNECT_PORT)
         print(f"[+] Connected to target {CONNECT_IP}:{CONNECT_PORT}")
@@ -91,7 +91,7 @@ async def handle_client(client_reader, client_writer):
         client_writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
         await client_writer.drain()
         
-        async def relay(reader, writer, direction):
+        async def relay(reader, writer):
             try:
                 while True:
                     data = await reader.read(8192)
@@ -102,20 +102,31 @@ async def handle_client(client_reader, client_writer):
             except:
                 pass
             finally:
-                writer.close()
+                try:
+                    writer.close()
+                except:
+                    pass
         
-        task1 = asyncio.create_task(relay(client_reader, target_writer, "C->T"))
-        task2 = asyncio.create_task(relay(target_reader, client_writer, "T->C"))
+        task1 = asyncio.create_task(relay(client_reader, target_writer))
+        task2 = asyncio.create_task(relay(target_reader, client_writer))
         await asyncio.gather(task1, task2)
         
     except Exception as e:
         print(f"[-] Error: {e}")
     finally:
-        client_writer.close()
+        try:
+            client_writer.close()
+        except:
+            pass
 
 async def main():
-    server = await asyncio.start_server(handle_client, host=LISTEN_HOST, port=LISTEN_PORT)
+    server = await asyncio.start_server(
+        handle_client, 
+        host=LISTEN_HOST, 
+        port=LISTEN_PORT
+    )
     print(f"[*] SOCKS5 Relay running on {LISTEN_HOST}:{LISTEN_PORT}")
+    print(f"[*] Forwarding to {CONNECT_IP}:{CONNECT_PORT}")
     async with server:
         await server.serve_forever()
 
