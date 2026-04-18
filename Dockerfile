@@ -2,12 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY config.json .
 COPY server.py .
 
 EXPOSE 40443
 
-CMD ["python", "server.py"]
+CMD ["python", "-u", "server.py"]
