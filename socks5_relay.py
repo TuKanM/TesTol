@@ -1,10 +1,10 @@
 import asyncio
 import socket
-import json
 import os
-from typing import Tuple, Dict
+import struct
+import json
 
-# Load config from environment variables or default
+# Load config
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8080"))
 CONNECT_IP = os.getenv("CONNECT_IP", "104.19.229.21")
@@ -13,7 +13,7 @@ FAKE_SNI = os.getenv("FAKE_SNI", "hcaptcha.com").encode()
 
 print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║                    TuKaN Relay Server                        ║
+║                    TuKaN SOCKS5 Relay                        ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Listen: {LISTEN_HOST}:{LISTEN_PORT}                                      
 ║  Target: {CONNECT_IP}:{CONNECT_PORT}                                     
@@ -21,47 +21,31 @@ print(f"""
 ╚══════════════════════════════════════════════════════════════╝
 """)
 
-# Store active connections
-connections: Dict[Tuple, asyncio.StreamReader] = {}
-
 
 def create_fake_client_hello(sni: bytes) -> bytes:
-    """Create a fake TLS ClientHello with the specified SNI"""
-    # TLS 1.2 ClientHello template (minimal)
-    tls_version = b"\x03\x03"  # TLS 1.2
-    
-    # Random 32 bytes
     import os
+    tls_version = b"\x03\x03"
     random_bytes = os.urandom(32)
-    
-    # Session ID (32 bytes)
     session_id = os.urandom(32)
-    
-    # Cipher suites
     cipher_suites = b"\x00\x2f\x00\x35\x00\x3c\x00\x3d\xc0\x2b\xc0\x2f\xcc\xa8\xcc\xa9"
-    
-    # Compression methods
     compression = b"\x01\x00"
     
-    # Extensions
-    # SNI Extension
     sni_len = len(sni)
     sni_extension = (
-        b"\x00\x00" +  # SNI extension type
-        (sni_len + 5).to_bytes(2, 'big') +  # Total length
-        (sni_len + 3).to_bytes(2, 'big') +  # Server name list length
-        b"\x00" +  # HostName type
-        sni_len.to_bytes(2, 'big') +  # HostName length
-        sni  # HostName
+        b"\x00\x00" +
+        (sni_len + 5).to_bytes(2, 'big') +
+        (sni_len + 3).to_bytes(2, 'big') +
+        b"\x00" +
+        sni_len.to_bytes(2, 'big') +
+        sni
     )
     
-    # Build ClientHello
     client_hello = (
-        b"\x16" +  # Handshake
-        tls_version +  # TLS version
+        b"\x16" +
+        tls_version +
         (len(random_bytes) + len(session_id) + len(cipher_suites) + len(compression) + len(sni_extension) + 6).to_bytes(2, 'big') +
-        b"\x01" +  # ClientHello
-        b"\x00\x00\x00" +  # Length placeholder
+        b"\x01" +
+        b"\x00\x00\x00" +
         tls_version +
         random_bytes +
         len(session_id).to_bytes(1, 'big') + session_id +
@@ -69,30 +53,76 @@ def create_fake_client_hello(sni: bytes) -> bytes:
         compression +
         len(sni_extension).to_bytes(2, 'big') + sni_extension
     )
-    
     return client_hello
 
 
+async def socks5_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Perform SOCKS5 handshake"""
+    # Read version and methods
+    data = await reader.read(2)
+    if data[0] != 0x05:
+        return False
+    
+    nmethods = data[1]
+    methods = await reader.read(nmethods)
+    
+    # No authentication
+    writer.write(b"\x05\x00")
+    await writer.drain()
+    return True
+
+
 async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
-    """Handle incoming client connection"""
+    """Handle SOCKS5 client connection"""
     client_addr = client_writer.get_extra_info('peername')
-    print(f"[+] New connection from {client_addr}")
+    print(f"[+] New SOCKS5 connection from {client_addr}")
     
     try:
-        # Create connection to target server
+        # SOCKS5 handshake
+        if not await socks5_handshake(client_reader, client_writer):
+            client_writer.close()
+            return
+        
+        # Read request
+        data = await client_reader.read(4)
+        if data[0] != 0x05:
+            return
+        
+        cmd = data[1]
+        if cmd != 0x01:  # CONNECT
+            client_writer.write(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+            return
+        
+        addr_type = data[3]
+        
+        if addr_type == 0x01:  # IPv4
+            addr_data = await client_reader.read(4)
+            port_data = await client_reader.read(2)
+            port = struct.unpack('>H', port_data)[0]
+            print(f"[-] Client requested connection to {'.'.join(map(str, addr_data))}:{port}")
+            # Always redirect to our target
+        elif addr_type == 0x03:  # Domain
+            domain_len = await client_reader.read(1)
+            domain = await client_reader.read(domain_len[0])
+            port_data = await client_reader.read(2)
+            port = struct.unpack('>H', port_data)[0]
+            print(f"[-] Client requested connection to {domain.decode()}:{port}")
+        
+        # Connect to target
         target_reader, target_writer = await asyncio.open_connection(CONNECT_IP, CONNECT_PORT)
         print(f"[+] Connected to target {CONNECT_IP}:{CONNECT_PORT}")
         
-        # Send fake TLS ClientHello first
+        # Send fake ClientHello
         fake_hello = create_fake_client_hello(FAKE_SNI)
         target_writer.write(fake_hello)
         await target_writer.drain()
         print(f"[+] Sent fake ClientHello with SNI: {FAKE_SNI.decode()}")
         
-        # Wait a bit for the fake packet to be processed
-        await asyncio.sleep(0.1)
+        # Send success response
+        client_writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+        await client_writer.drain()
         
-        # Create bidirectional relay tasks
+        # Relay data bidirectionally
         async def relay(reader, writer, direction: str):
             try:
                 while True:
@@ -107,11 +137,9 @@ async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyn
             finally:
                 writer.close()
         
-        # Run both directions concurrently
         task1 = asyncio.create_task(relay(client_reader, target_writer, "C->T"))
         task2 = asyncio.create_task(relay(target_reader, client_writer, "T->C"))
         
-        # Wait for either task to complete
         await asyncio.gather(task1, task2)
         
     except Exception as e:
@@ -128,9 +156,8 @@ async def main():
         port=LISTEN_PORT
     )
     
-    print(f"[*] Relay server running on {LISTEN_HOST}:{LISTEN_PORT}")
+    print(f"[*] SOCKS5 Relay running on {LISTEN_HOST}:{LISTEN_PORT}")
     print(f"[*] Forwarding to {CONNECT_IP}:{CONNECT_PORT}")
-    print(f"[*] Fake SNI: {FAKE_SNI.decode()}")
     
     async with server:
         await server.serve_forever()
