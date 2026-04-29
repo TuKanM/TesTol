@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "https://backboard.vercel.app/$1"
+    }
+  ]
+}
